@@ -1,0 +1,114 @@
+name: Deploy to Production
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    branches: [main]
+    types: [completed]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    # The "production" GitHub environment should have required reviewers
+    # configured in repo settings (Settings -> Environments -> production
+    # -> Required reviewers) — this makes the job PAUSE here and wait for
+    # a human to click Approve before any of the steps below run. That
+    # manual gate is intentional: staging deploys automatically, production
+    # does not.
+    environment: production
+
+    defaults:
+      run:
+        working-directory: apps/api
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: .
+
+      - name: Build
+        run: npm run build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-2
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        working-directory: .
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ECR_REPOSITORY: knockit-api-production
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f apps/api/Dockerfile .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      # Always take an RDS snapshot immediately before a production migration.
+      # Costs a couple of minutes; the alternative is no fast path back if a
+      # migration corrupts data, which is a much worse trade.
+      - name: Snapshot production database before migrating
+        run: |
+          aws rds create-db-snapshot \
+            --db-instance-identifier knockit-production \
+            --db-snapshot-identifier "pre-deploy-$(date +%Y%m%d-%H%M%S)-${{ github.sha }}"
+          aws rds wait db-snapshot-completed \
+            --db-snapshot-identifier "pre-deploy-$(date +%Y%m%d-%H%M%S)-${{ github.sha }}" || true
+
+      - name: Run database migrations on production
+        run: |
+          aws ecs run-task \
+            --cluster knockit-production-cluster \
+            --task-definition knockit-api-migrate-production \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.PRODUCTION_PRIVATE_SUBNET_IDS }}],securityGroups=[${{ secrets.PRODUCTION_SECURITY_GROUP_ID }}]}" \
+            --overrides "{\"containerOverrides\":[{\"name\":\"migrate\",\"command\":[\"npm\",\"run\",\"migration:run:prod\"]}]}"
+
+      - name: Deploy new image to ECS service
+        run: |
+          aws ecs update-service \
+            --cluster knockit-production-cluster \
+            --service knockit-api-production \
+            --force-new-deployment
+
+      - name: Wait for service to stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster knockit-production-cluster \
+            --services knockit-api-production
+
+      - name: Verify production health endpoint
+        run: |
+          for i in $(seq 1 10); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://app.knockit.co.uk/api/v1/health || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Production is healthy"
+              exit 0
+            fi
+            echo "Attempt $i: got HTTP $STATUS, retrying in 10s..."
+            sleep 10
+          done
+          echo "Production health check failed after deploy — investigate immediately"
+          exit 1

@@ -1,0 +1,28 @@
+{
+  "name": "knockit-crm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Knockit Technologies — CRM, Project Management, Helpdesk & Client Portal platform",
+  "workspaces": [
+    "apps/api",
+    "apps/web",
+    "packages/shared-types"
+  ],
+  "scripts": {
+    "dev": "docker compose -f infra/docker/docker-compose.dev.yml up --build",
+    "dev:down": "docker compose -f infra/docker/docker-compose.dev.yml down",
+    "dev:logs": "docker compose -f infra/docker/docker-compose.dev.yml logs -f",
+    "api:dev": "npm run start:dev --workspace=apps/api",
+    "web:dev": "npm run dev --workspace=apps/web",
+    "migrate:dev": "npm run migration:run --workspace=apps/api",
+    "migrate:generate": "npm run migration:generate --workspace=apps/api",
+    "seed:dev": "npm run seed --workspace=apps/api",
+    "test": "npm run test --workspace=apps/api",
+    "test:e2e": "npm run test:e2e --workspace=apps/api",
+    "lint": "npm run lint --workspace=apps/api && npm run lint --workspace=apps/web",
+    "build": "npm run build --workspace=apps/api && npm run build --workspace=apps/web"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

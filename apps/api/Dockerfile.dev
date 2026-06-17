@@ -1,0 +1,14 @@
+# Development image — installs all deps (incl. devDeps) and runs with watch mode.
+# Source code is bind-mounted in docker-compose.dev.yml so edits hot-reload
+# without rebuilding the image.
+FROM node:20-alpine
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+
+EXPOSE 3000
+
+CMD ["npm", "run", "start:dev"]

@@ -1,0 +1,135 @@
+name: CI
+
+# Runs on every PR and every push to develop/main. This is the gate that
+# must pass before anything merges — it's deliberately NOT the same
+# workflow that deploys, so a red CI run never has a chance to touch
+# staging or production.
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+
+defaults:
+  run:
+    working-directory: apps/api
+
+jobs:
+  lint-and-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: .
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint-and-typecheck
+
+    # A real, ephemeral Postgres for the duration of the job — this is what
+    # lets unit tests that hit a real repository layer (or future e2e tests)
+    # run in CI without anyone hand-provisioning a test database.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: knockit
+          POSTGRES_PASSWORD: knockit_ci_password
+          POSTGRES_DB: knockit_crm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      NODE_ENV: test
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_USERNAME: knockit
+      DB_PASSWORD: knockit_ci_password
+      DB_DATABASE: knockit_crm_test
+      DB_SSL: 'false'
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      JWT_ACCESS_SECRET: ci_test_access_secret_not_for_real_use
+      JWT_REFRESH_SECRET: ci_test_refresh_secret_not_for_real_use
+      FRONTEND_URL: http://localhost:5173
+      PORT: 3000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: .
+
+      - name: Run database migrations against the CI Postgres
+        run: npm run migration:run
+
+      - name: Run unit tests
+        run: npm test -- --ci --coverage
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: apps/api/coverage
+          retention-days: 14
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: .
+
+      - name: Build
+        run: npm run build
+
+      # Confirms the production build artifact is actually produced, so a
+      # broken build is caught here rather than discovered during a deploy.
+      - name: Verify build output exists
+        run: test -f dist/main.js
