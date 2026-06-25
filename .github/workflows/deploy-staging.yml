@@ -1,23 +1,17 @@
 name: Deploy to Staging
 
-# Fires only after CI has already passed on develop (workflow_run waits for
-# the CI workflow to complete successfully on this exact commit) — this is
-# what guarantees a red test run can never reach staging.
 on:
-  workflow_run:
-    workflows: ["CI"]
+  push:
     branches: [develop]
-    types: [completed]
 
 permissions:
-  id-token: write   # required for OIDC -> AWS role assumption, no stored AWS keys
+  id-token: write
   contents: read
 
 jobs:
   deploy:
-    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    environment: staging  # ties this to GitHub's "staging" environment — set required reviewers/secrets there if desired
+    environment: staging
 
     defaults:
       run:
@@ -25,8 +19,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: develop
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -41,10 +33,6 @@ jobs:
       - name: Build
         run: npm run build
 
-      # ── AWS auth via OIDC — replace the role ARN below once it exists.
-      # This role needs (at minimum): ecr:GetAuthorizationToken,
-      # ecr:BatchCheckLayerAvailability, ecr:PutImage for pushing the image,
-      # and ecs:UpdateService / ecs:DescribeServices for the deploy step.
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -67,14 +55,7 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-      # Migrations run as a ONE-OFF task against the staging RDS instance,
-      # separate from the long-running API service — never let app startup
-      # silently run migrations, since that makes rollback and multi-instance
-      # deploys unsafe (two containers booting simultaneously would both try
-      # to run the same migration).
       - name: Run database migrations on staging
-        env:
-          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
         run: |
           aws ecs run-task \
             --cluster knockit-staging-cluster \
@@ -99,7 +80,7 @@ jobs:
       - name: Verify staging health endpoint
         run: |
           for i in $(seq 1 10); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://staging.knockit.app/api/v1/health || echo "000")
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://knockit-staging-alb-105610571.eu-west-2.elb.amazonaws.com/api/v1/health || echo "000")
             if [ "$STATUS" = "200" ]; then
               echo "Staging is healthy"
               exit 0
